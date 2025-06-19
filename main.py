@@ -2,30 +2,41 @@ import asyncio
 import shutil
 import uuid
 from pathlib import Path
+from typing import Optional
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
 # --- Application Settings ---
 app = FastAPI(
-    title="AAC to MP4 Converter",
-    description="An API to convert AAC to MP4 using FastAPI and FFmpeg",
+    title="AAC to MP4 Converter with Subtitles",
+    description="An API to convert AAC to MP4, optionally adding SRT subtitles using a fixed image logo.png.",
 )
 
 # Create a temporary directory to store uploaded and output files
 TEMP_DIR = Path("temp_files")
-TEMP_DIR.mkdir(exist_ok=True)
+TEMP_DIR.mkdir(exist_exist_ok=True)
+
+# Define the path to the fixed logo image
+LOGO_PATH = Path("logo.png")
 
 
 # --- FFmpeg Check ---
 def check_ffmpeg_installed():
-    """Checks if FFmpeg is installed and accessible in the system PATH during startup."""
+    """Checks if FFmpeg is installed and accessible in the system PATH."""
     if not shutil.which("ffmpeg"):
-        print("Error: FFmpeg is not installed or not in the system PATH.")
-        print("Please install FFmpeg and ensure it's executable from the command line.")
-        # In a cloud environment, this is typically done via 'apt-get install ffmpeg' or similar in a Dockerfile
-        raise RuntimeError("FFmpeg not found in system's PATH.")
+        raise RuntimeError(
+            "FFmpeg not found. Please install FFmpeg and ensure it's in the system's PATH."
+        )
+
+
+# Run check on startup
+check_ffmpeg_installed()
+
+# Check if logo.png exists on startup
+if not LOGO_PATH.exists():
+    raise RuntimeError("logo.png file not found in the working directory.")
 
 
 # --- Cleanup Function ---
@@ -36,95 +47,95 @@ def cleanup_files(paths: list[Path]):
             path.unlink()
 
 
+# --- FFmpeg Utility ---
+def escape_ffmpeg_path(path_str: str) -> str:
+    """Escapes a path for use in FFmpeg filters (e.g., subtitles)."""
+    # For Windows paths primarily, but good practice.
+    # FFmpeg filters can be picky about colons and backslashes.
+    return path_str.replace("\\", "/").replace(":", "\\:")
+
+
 # --- API Endpoint ---
-@app.post("/convert-aac-to-mp4/", tags=["Conversion"])
-async def convert_aac_to_mp4(
+@app.post("/convert/", tags=["Conversion"])
+async def convert_to_mp4_with_subtitles(
     audio_file: UploadFile = File(..., description="The AAC audio file to convert."),
-    image_file: UploadFile = "logo.png",
+    subtitle_file: Optional[UploadFile] = File(
+        None, description="Optional SRT subtitle file to add."
+    ),
+    subtitle_mode: str = Query(
+        "hard",
+        enum=["hard", "soft"],
+        description="Subtitle mode: 'hard' (burned into video) or 'soft' (embed as a switchable track).",
+    ),
 ):
     """
-    Receives an AAC file and an optional image file, then converts them to an MP4 file.
+    Converts an AAC file to an MP4 video using a fixed 'logo.png' image,
+    with optional SRT subtitles.
 
-    - **If only an audio file is provided**: The audio stream is directly encapsulated into an MP4 container (`-c:a copy`).
-    - **If both audio and image files are provided**: A video will be generated using the image as the visual and the audio as the soundtrack.
+    - **With Subtitles (Hard)**: Burns subtitles directly into the video (requires 'logo.png').
+    - **With Subtitles (Soft)**: Adds subtitles as a selectable track (requires 'logo.png').
     """
-    check_ffmpeg_installed()
-
     job_id = str(uuid.uuid4())
-
-    # Save the uploaded files to the temporary directory
-    input_aac_path = TEMP_DIR / f"{job_id}_{audio_file.filename}"
-    output_mp4_path = TEMP_DIR / f"{job_id}_output.mp4"
+    files_to_clean = []
 
     try:
-        # Save the audio file
-        contents = await audio_file.read()
-        with open(input_aac_path, "wb") as f:
-            f.write(contents)
+        # --- Save Uploaded Files ---
+        input_aac_path = TEMP_DIR / f"{job_id}_{audio_file.filename}"
+        await _save_upload_file(audio_file, input_aac_path)
+        files_to_clean.append(input_aac_path)
 
-        input_image_path = None
-        if image_file:
-            # Save the image file
-            input_image_path = TEMP_DIR / f"{job_id}_{image_file.filename}"
-            image_contents = await image_file.read()
-            with open(input_image_path, "wb") as f:
-                f.write(image_contents)
+        input_srt_path = None
+        if subtitle_file:
+            input_srt_path = TEMP_DIR / f"{job_id}_{subtitle_file.filename}"
+            await _save_upload_file(subtitle_file, input_srt_path)
+            files_to_clean.append(input_srt_path)
 
-        # Construct different FFmpeg commands based on whether an image is provided
-        if input_image_path:
-            # Scenario 2: Combine image and audio to generate a video
-            cmd = [
-                "ffmpeg",
-                "-loop",
-                "1",  # Loop the image
-                "-i",
-                str(input_image_path),  # Input 1: Image
-                "-i",
-                str(input_aac_path),  # Input 2: Audio
-                "-c:v",
-                "libx264",  # Video encoder
-                "-tune",
-                "stillimage",  # Optimize for still images
-                "-c:a",
-                "copy",  # Directly copy the audio stream, no re-encoding
-                "-pix_fmt",
-                "yuv420p",  # Ensure player compatibility
-                "-shortest",  # Stop output when the shortest input stream (audio) ends
-                "-y",  # Overwrite existing output file
-                str(output_mp4_path),
-            ]
-        else:
-            # Scenario 1: Only encapsulate AAC into an MP4 container
-            cmd = [
-                "ffmpeg",
-                "-i",
-                str(input_aac_path),
-                "-c:a",
-                "copy",  # Directly copy the audio codec, very fast
-                "-y",
-                str(output_mp4_path),
-            ]
+        output_mp4_path = TEMP_DIR / f"{job_id}_output.mp4"
+        files_to_clean.append(output_mp4_path)
 
-        # Execute FFmpeg asynchronously using asyncio.create_subprocess_exec to avoid blocking
+        # --- Construct FFmpeg Command ---
+        cmd = ["ffmpeg"]
+
+        # Always use logo.png as the image input
+        cmd.extend(["-loop", "1", "-i", str(LOGO_PATH)])
+        cmd.extend(["-i", str(input_aac_path)])
+
+        if input_srt_path and subtitle_mode == "soft":
+            cmd.extend(["-i", str(input_srt_path)])
+
+        # Video and Audio Codec Settings (always creating video with logo)
+        cmd.extend(["-c:v", "libx264", "-tune", "stillimage", "-pix_fmt", "yuv420p"])
+        cmd.extend(["-c:a", "copy"])
+
+        # --- Subtitle Settings ---
+        if input_srt_path:
+            if subtitle_mode == "hard":
+                # Hardsubbing uses a video filter
+                escaped_srt_path = escape_ffmpeg_path(str(input_srt_path))
+                cmd.extend(["-vf", f"subtitles={escaped_srt_path}"])
+            else:  # soft
+                # Softsubbing copies the subtitle stream into the container
+                cmd.extend(["-c:s", "mov_text", "-metadata:s:s:0", "language=eng"])
+
+        # --- Final Command Arguments ---
+        cmd.append(
+            "-shortest"
+        )  # Stop output when the shortest input stream (audio) ends
+        cmd.extend(["-y", str(output_mp4_path)])  # Overwrite existing output file
+
+        # --- Execute FFmpeg ---
         process = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await process.communicate()
 
         if process.returncode != 0:
-            # If FFmpeg execution fails, return an error message
             error_detail = stderr.decode().strip()
-            print(f"FFmpeg Error: {error_detail}")
             raise HTTPException(
                 status_code=500, detail=f"FFmpeg conversion failed: {error_detail}"
             )
 
-        # Prepare cleanup tasks
-        files_to_clean = [input_aac_path, output_mp4_path]
-        if input_image_path:
-            files_to_clean.append(input_image_path)
-
-        # Return the file using FileResponse and perform cleanup in a background task
+        # --- Return File and Cleanup ---
         return FileResponse(
             path=output_mp4_path,
             media_type="video/mp4",
@@ -133,21 +144,22 @@ async def convert_aac_to_mp4(
         )
 
     except Exception as e:
-        # Catch other potential errors
-        # Note: 'input_image_path' needs to be checked for existence in locals()
-        # to prevent UnboundLocalError if it was never assigned.
-        cleanup_files(
-            [
-                input_aac_path,
-                output_mp4_path,
-                input_image_path if "input_image_path" in locals() else None,
-            ]
-        )
+        # Ensure cleanup happens even on unexpected errors
+        cleanup_files(files_to_clean)
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _save_upload_file(upload_file: UploadFile, destination: Path):
+    """Helper function to save an UploadFile to a destination."""
+    contents = await upload_file.read()
+    with open(destination, "wb") as f:
+        f.write(contents)
 
 
 @app.get("/", tags=["Root"])
 def read_root():
     return {
-        "message": "Welcome to the AAC to MP4 Converter API. Please visit /docs for API documentation."
+        "message": "Welcome to the AAC to MP4 Converter API. Visit /docs for documentation."
     }
