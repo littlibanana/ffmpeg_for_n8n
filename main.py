@@ -2,16 +2,15 @@ import asyncio
 import shutil
 import uuid
 from pathlib import Path
-from typing import Optional
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
 # --- Application Settings ---
 app = FastAPI(
-    title="AAC to MP4 Converter with Subtitles",
-    description="An API to convert AAC to MP4, optionally adding SRT subtitles using a fixed image logo.png.",
+    title="AAC to MP4 Converter with Fixed Image",
+    description="An API to convert AAC to MP4 using a fixed 'logo.png' image.",
 )
 
 # Create a temporary directory to store uploaded and output files
@@ -47,81 +46,48 @@ def cleanup_files(paths: list[Path]):
             path.unlink()
 
 
-# --- FFmpeg Utility ---
-def escape_ffmpeg_path(path_str: str) -> str:
-    """Escapes a path for use in FFmpeg filters (e.g., subtitles)."""
-    # For Windows paths primarily, but good practice.
-    # FFmpeg filters can be picky about colons and backslashes.
-    return path_str.replace("\\", "/").replace(":", "\\:")
-
-
 # --- API Endpoint ---
 @app.post("/convert/", tags=["Conversion"])
-async def convert_to_mp4_with_subtitles(
+async def convert_aac_to_mp4_with_logo(
     audio_file: UploadFile = File(..., description="The AAC audio file to convert."),
-    subtitle_file: Optional[UploadFile] = File(
-        None, description="Optional SRT subtitle file to add."
-    ),
-    subtitle_mode: str = Query(
-        "hard",
-        enum=["hard", "soft"],
-        description="Subtitle mode: 'hard' (burned into video) or 'soft' (embed as a switchable track).",
-    ),
 ):
     """
-    Converts an AAC file to an MP4 video using a fixed 'logo.png' image,
-    with optional SRT subtitles.
-
-    - **With Subtitles (Hard)**: Burns subtitles directly into the video (requires 'logo.png').
-    - **With Subtitles (Soft)**: Adds subtitles as a selectable track (requires 'logo.png').
+    Converts an AAC file to an MP4 video using a fixed 'logo.png' image.
+    The 'logo.png' will be used as the visual track for the entire duration of the audio.
     """
     job_id = str(uuid.uuid4())
     files_to_clean = []
 
     try:
-        # --- Save Uploaded Files ---
+        # --- Save Uploaded Audio File ---
         input_aac_path = TEMP_DIR / f"{job_id}_{audio_file.filename}"
         await _save_upload_file(audio_file, input_aac_path)
         files_to_clean.append(input_aac_path)
-
-        input_srt_path = None
-        if subtitle_file:
-            input_srt_path = TEMP_DIR / f"{job_id}_{subtitle_file.filename}"
-            await _save_upload_file(subtitle_file, input_srt_path)
-            files_to_clean.append(input_srt_path)
 
         output_mp4_path = TEMP_DIR / f"{job_id}_output.mp4"
         files_to_clean.append(output_mp4_path)
 
         # --- Construct FFmpeg Command ---
-        cmd = ["ffmpeg"]
-
-        # Always use logo.png as the image input
-        cmd.extend(["-loop", "1", "-i", str(LOGO_PATH)])
-        cmd.extend(["-i", str(input_aac_path)])
-
-        if input_srt_path and subtitle_mode == "soft":
-            cmd.extend(["-i", str(input_srt_path)])
-
-        # Video and Audio Codec Settings (always creating video with logo)
-        cmd.extend(["-c:v", "libx264", "-tune", "stillimage", "-pix_fmt", "yuv420p"])
-        cmd.extend(["-c:a", "copy"])
-
-        # --- Subtitle Settings ---
-        if input_srt_path:
-            if subtitle_mode == "hard":
-                # Hardsubbing uses a video filter
-                escaped_srt_path = escape_ffmpeg_path(str(input_srt_path))
-                cmd.extend(["-vf", f"subtitles={escaped_srt_path}"])
-            else:  # soft
-                # Softsubbing copies the subtitle stream into the container
-                cmd.extend(["-c:s", "mov_text", "-metadata:s:s:0", "language=eng"])
-
-        # --- Final Command Arguments ---
-        cmd.append(
-            "-shortest"
-        )  # Stop output when the shortest input stream (audio) ends
-        cmd.extend(["-y", str(output_mp4_path)])  # Overwrite existing output file
+        cmd = [
+            "ffmpeg",
+            "-loop",
+            "1",  # Loop the image
+            "-i",
+            str(LOGO_PATH),  # Input 1: The fixed logo image
+            "-i",
+            str(input_aac_path),  # Input 2: The uploaded AAC audio file
+            "-c:v",
+            "libx264",  # Video encoder
+            "-tune",
+            "stillimage",  # Optimize for still images
+            "-pix_fmt",
+            "yuv420p",  # Ensure player compatibility (important for wide playback)
+            "-c:a",
+            "copy",  # Directly copy the audio stream, no re-encoding (very fast)
+            "-shortest",  # Stop output when the shortest input stream (audio) ends
+            "-y",  # Overwrite existing output file
+            str(output_mp4_path),
+        ]
 
         # --- Execute FFmpeg ---
         process = await asyncio.create_subprocess_exec(
