@@ -40,7 +40,7 @@ def cleanup_files(paths: list[Path]):
 @app.post("/convert-aac-to-mp4/", tags=["Conversion"])
 async def convert_aac_to_mp4(
     audio_file: UploadFile = File(..., description="The AAC audio file to convert."),
-    image_file: UploadFile = File("logo.png"),
+    image_file: UploadFile = "logo.png",
 ):
     """
     Receives an AAC file and an optional image file, then converts them to an MP4 file.
