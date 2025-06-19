@@ -70,6 +70,7 @@ async def convert_aac_to_mp4_with_logo(
         # --- Construct FFmpeg Command ---
         cmd = [
             "ffmpeg",
+            "-y",  # Overwrite existing output file without asking
             "-loop",
             "1",  # Loop the image
             "-i",
@@ -78,14 +79,11 @@ async def convert_aac_to_mp4_with_logo(
             str(input_aac_path),  # Input 2: The uploaded AAC audio file
             "-c:v",
             "libx264",  # Video encoder
-            "-tune",
-            "stillimage",  # Optimize for still images
             "-pix_fmt",
             "yuv420p",  # Ensure player compatibility (important for wide playback)
             "-c:a",
             "copy",  # Directly copy the audio stream, no re-encoding (very fast)
             "-shortest",  # Stop output when the shortest input stream (audio) ends
-            "-y",  # Overwrite existing output file
             str(output_mp4_path),
         ]
 
