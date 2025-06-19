@@ -16,7 +16,7 @@ app = FastAPI(
 
 # Create a temporary directory to store uploaded and output files
 TEMP_DIR = Path("temp_files")
-TEMP_DIR.mkdir(exist_exist_ok=True)
+TEMP_DIR.mkdir(exist_ok=True)
 
 # Define the path to the fixed logo image
 LOGO_PATH = Path("logo.png")
